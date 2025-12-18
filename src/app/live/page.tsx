@@ -856,10 +856,8 @@ function LivePageClient() {
       }
     } catch (err) {
       console.error('初始化Anime4K失败:', err);
-      if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '超分启用失败：' + (err instanceof Error ? err.message : '未知错误');
-      }
 
+      // 清理已创建的资源
       if (frameRequestId) {
         cancelAnimationFrame(frameRequestId);
       }
@@ -874,6 +872,15 @@ function LivePageClient() {
         artPlayerRef.current.video.style.position = '';
         artPlayerRef.current.video.style.zIndex = '';
       }
+
+      // 显示错误信息
+      if (artPlayerRef.current) {
+        const errorMsg = err instanceof Error ? err.message : '未知错误';
+        artPlayerRef.current.notice.show = '超分启用失败：' + errorMsg;
+      }
+
+      // 重新抛出错误，让调用者知道失败了
+      throw err;
     }
   };
 
@@ -927,14 +934,26 @@ function LivePageClient() {
   const toggleAnime4K = async (enabled: boolean) => {
     try {
       if (enabled) {
+        // 检查视频是否准备好
+        if (!artPlayerRef.current?.video) {
+          if (artPlayerRef.current) {
+            artPlayerRef.current.notice.show = '视频未准备好，请稍后再试';
+          }
+          return false;
+        }
         await initAnime4K();
       } else {
         await cleanupAnime4K();
       }
       setAnime4kEnabled(enabled);
       localStorage.setItem('enable_anime4k', String(enabled));
+      return enabled;
     } catch (err) {
       console.error('切换超分状态失败:', err);
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '切换超分状态失败';
+      }
+      return !enabled; // 返回原来的状态
     }
   };
 
@@ -945,11 +964,21 @@ function LivePageClient() {
       localStorage.setItem('anime4k_mode', mode);
 
       if (anime4kEnabledRef.current) {
+        // 检查视频是否准备好
+        if (!artPlayerRef.current?.video) {
+          if (artPlayerRef.current) {
+            artPlayerRef.current.notice.show = '视频未准备好，请稍后再试';
+          }
+          return;
+        }
         await cleanupAnime4K();
         await initAnime4K();
       }
     } catch (err) {
       console.error('更改超分模式失败:', err);
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '更改超分模式失败';
+      }
     }
   };
 
@@ -960,11 +989,21 @@ function LivePageClient() {
       localStorage.setItem('anime4k_scale', scale.toString());
 
       if (anime4kEnabledRef.current) {
+        // 检查视频是否准备好
+        if (!artPlayerRef.current?.video) {
+          if (artPlayerRef.current) {
+            artPlayerRef.current.notice.show = '视频未准备好，请稍后再试';
+          }
+          return;
+        }
         await cleanupAnime4K();
         await initAnime4K();
       }
     } catch (err) {
       console.error('更改超分倍数失败:', err);
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '更改超分倍数失败';
+      }
     }
   };
 
@@ -1411,7 +1450,7 @@ function LivePageClient() {
           autoSize: false,
           autoMini: false,
           screenshot: false,
-          setting: true,
+          setting: webGPUSupported, // 只有支持WebGPU时才显示设置按钮
           loop: false,
           flip: false,
           playbackRate: false,
@@ -1449,8 +1488,8 @@ function LivePageClient() {
                 switch: anime4kEnabledRef.current,
                 onSwitch: async function (item: any) {
                   const newVal = !item.switch;
-                  await toggleAnime4K(newVal);
-                  return newVal;
+                  const result = await toggleAnime4K(newVal);
+                  return result;
                 },
               },
               {
