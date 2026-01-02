@@ -83,10 +83,12 @@ export async function POST(request: NextRequest) {
 
       // 如果使用用户名密码，先认证
       let finalUserId: string | undefined = UserId; // 使用用户提供的 UserId
+      let authToken: string | undefined;
       if (!ApiKey && Username && Password) {
         try {
           const authResult = await client.authenticate(Username, Password);
           finalUserId = authResult.User.Id;
+          authToken = authResult.AccessToken;
         } catch (error) {
           return NextResponse.json(
             { error: 'Emby 认证失败: ' + (error as Error).message },
@@ -112,6 +114,7 @@ export async function POST(request: NextRequest) {
         Username: Username || undefined,
         Password: Password || undefined,
         UserId: finalUserId,
+        AuthToken: authToken,
         Libraries: Libraries || [],
         LastSyncTime: Date.now(),
       };

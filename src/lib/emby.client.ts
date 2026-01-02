@@ -6,6 +6,7 @@ interface EmbyConfig {
   Username?: string;
   Password?: string;
   UserId?: string;
+  AuthToken?: string;
 }
 
 interface EmbyItem {
@@ -55,6 +56,8 @@ export class EmbyClient {
   private apiKey?: string;
   private userId?: string;
   private authToken?: string;
+  private username?: string;
+  private password?: string;
 
   constructor(config: EmbyConfig) {
     let serverUrl = config.ServerURL.replace(/\/$/, '');
@@ -65,6 +68,30 @@ export class EmbyClient {
     this.serverUrl = serverUrl;
     this.apiKey = config.ApiKey;
     this.userId = config.UserId;
+    this.authToken = config.AuthToken;
+    this.username = config.Username;
+    this.password = config.Password;
+
+    console.log('[EmbyClient] constructor - ServerURL:', this.serverUrl);
+    console.log('[EmbyClient] constructor - ApiKey:', this.apiKey);
+    console.log('[EmbyClient] constructor - UserId:', this.userId);
+    console.log('[EmbyClient] constructor - AuthToken:', this.authToken);
+  }
+
+  private async ensureAuthenticated(): Promise<void> {
+    // 如果有 ApiKey，不需要认证
+    if (this.apiKey) return;
+
+    // 如果有 AuthToken，假设它是有效的
+    if (this.authToken) return;
+
+    // 如果有用户名和密码，自动认证
+    if (this.username && this.password) {
+      console.log('[EmbyClient] Auto-authenticating with username/password');
+      const authResult = await this.authenticate(this.username, this.password);
+      this.authToken = authResult.AccessToken;
+      this.userId = authResult.User.Id;
+    }
   }
 
   private getHeaders(): Record<string, string> {
@@ -82,17 +109,27 @@ export class EmbyClient {
   }
 
   async authenticate(username: string, password: string): Promise<{ AccessToken: string; User: { Id: string } }> {
-    const response = await fetch(`${this.serverUrl}/Users/AuthenticateByName`, {
+    const url = `${this.serverUrl}/Users/AuthenticateByName`;
+    console.log('[EmbyClient] authenticate - URL:', url);
+
+    const params = new URLSearchParams({
+      Username: username,
+      Pw: password,
+    });
+
+    const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        Username: username,
-        Pw: password,
-      }),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Emby-Authorization': 'MediaBrowser Client="LunaTV", Device="Web", DeviceId="lunatv-web", Version="1.0.0"',
+      },
+      body: params.toString(),
     });
 
     if (!response.ok) {
-      throw new Error('Emby 认证失败');
+      const errorText = await response.text();
+      console.error('[EmbyClient] authenticate - Error:', response.status, errorText);
+      throw new Error(`Emby 认证失败 (${response.status}): ${errorText}`);
     }
 
     const data = await response.json();
@@ -129,6 +166,8 @@ export class EmbyClient {
   }
 
   async getItems(params: GetItemsParams): Promise<EmbyItemsResult> {
+    await this.ensureAuthenticated();
+
     if (!this.userId) {
       throw new Error('未配置 Emby 用户 ID，请在管理面板重新保存 Emby 配置');
     }
@@ -159,6 +198,26 @@ export class EmbyClient {
 
     const response = await fetch(url);
 
+    // 如果是 401 错误且有用户名密码，尝试重新认证
+    if (response.status === 401 && this.username && this.password && !this.apiKey) {
+      console.log('[EmbyClient] Token expired, re-authenticating...');
+      const authResult = await this.authenticate(this.username, this.password);
+      this.authToken = authResult.AccessToken;
+      this.userId = authResult.User.Id;
+
+      // 重试请求
+      searchParams.set('X-Emby-Token', this.authToken);
+      const retryUrl = `${this.serverUrl}/Users/${this.userId}/Items?${searchParams.toString()}`;
+      const retryResponse = await fetch(retryUrl);
+
+      if (!retryResponse.ok) {
+        const errorText = await retryResponse.text();
+        throw new Error(`获取 Emby 媒体列表失败 (${retryResponse.status}): ${errorText}`);
+      }
+
+      return await retryResponse.json();
+    }
+
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error(`获取 Emby 媒体列表失败 (${response.status}): ${errorText}`);
@@ -168,9 +227,34 @@ export class EmbyClient {
   }
 
   async getItem(itemId: string): Promise<EmbyItem> {
+    await this.ensureAuthenticated();
+
+    if (!this.userId) {
+      throw new Error('未配置 Emby 用户 ID，请在管理面板重新保存 Emby 配置');
+    }
+
     const token = this.apiKey || this.authToken;
     const url = `${this.serverUrl}/Users/${this.userId}/Items/${itemId}?Fields=MediaSources${token ? `&api_key=${token}` : ''}`;
     const response = await fetch(url);
+
+    // 如果是 401 错误且有用户名密码，尝试重新认证
+    if (response.status === 401 && this.username && this.password && !this.apiKey) {
+      console.log('[EmbyClient] Token expired, re-authenticating...');
+      const authResult = await this.authenticate(this.username, this.password);
+      this.authToken = authResult.AccessToken;
+      this.userId = authResult.User.Id;
+
+      // 重试请求
+      const retryToken = this.authToken;
+      const retryUrl = `${this.serverUrl}/Users/${this.userId}/Items/${itemId}?Fields=MediaSources${retryToken ? `&api_key=${retryToken}` : ''}`;
+      const retryResponse = await fetch(retryUrl);
+
+      if (!retryResponse.ok) {
+        throw new Error('获取 Emby 媒体详情失败');
+      }
+
+      return await retryResponse.json();
+    }
 
     if (!response.ok) {
       throw new Error('获取 Emby 媒体详情失败');
@@ -180,9 +264,35 @@ export class EmbyClient {
   }
 
   async getSeasons(seriesId: string): Promise<EmbyItem[]> {
+    await this.ensureAuthenticated();
+
+    if (!this.userId) {
+      throw new Error('未配置 Emby 用户 ID，请在管理面板重新保存 Emby 配置');
+    }
+
     const token = this.apiKey || this.authToken;
     const url = `${this.serverUrl}/Shows/${seriesId}/Seasons?userId=${this.userId}${token ? `&api_key=${token}` : ''}`;
     const response = await fetch(url);
+
+    // 如果是 401 错误且有用户名密码，尝试重新认证
+    if (response.status === 401 && this.username && this.password && !this.apiKey) {
+      console.log('[EmbyClient] Token expired, re-authenticating...');
+      const authResult = await this.authenticate(this.username, this.password);
+      this.authToken = authResult.AccessToken;
+      this.userId = authResult.User.Id;
+
+      // 重试请求
+      const retryToken = this.authToken;
+      const retryUrl = `${this.serverUrl}/Shows/${seriesId}/Seasons?userId=${this.userId}${retryToken ? `&api_key=${retryToken}` : ''}`;
+      const retryResponse = await fetch(retryUrl);
+
+      if (!retryResponse.ok) {
+        throw new Error('获取 Emby 季列表失败');
+      }
+
+      const retryData = await retryResponse.json();
+      return retryData.Items || [];
+    }
 
     if (!response.ok) {
       throw new Error('获取 Emby 季列表失败');
@@ -193,6 +303,12 @@ export class EmbyClient {
   }
 
   async getEpisodes(seriesId: string, seasonId?: string): Promise<EmbyItem[]> {
+    await this.ensureAuthenticated();
+
+    if (!this.userId) {
+      throw new Error('未配置 Emby 用户 ID，请在管理面板重新保存 Emby 配置');
+    }
+
     const token = this.apiKey || this.authToken;
     const searchParams = new URLSearchParams({
       userId: this.userId!,
@@ -209,6 +325,38 @@ export class EmbyClient {
 
     const url = `${this.serverUrl}/Shows/${seriesId}/Episodes?${searchParams.toString()}`;
     const response = await fetch(url);
+
+    // 如果是 401 错误且有用户名密码，尝试重新认证
+    if (response.status === 401 && this.username && this.password && !this.apiKey) {
+      console.log('[EmbyClient] Token expired, re-authenticating...');
+      const authResult = await this.authenticate(this.username, this.password);
+      this.authToken = authResult.AccessToken;
+      this.userId = authResult.User.Id;
+
+      // 重试请求
+      const retrySearchParams = new URLSearchParams({
+        userId: this.userId!,
+        Fields: 'MediaSources',
+      });
+
+      if (seasonId) {
+        retrySearchParams.set('seasonId', seasonId);
+      }
+
+      if (this.authToken) {
+        retrySearchParams.set('api_key', this.authToken);
+      }
+
+      const retryUrl = `${this.serverUrl}/Shows/${seriesId}/Episodes?${retrySearchParams.toString()}`;
+      const retryResponse = await fetch(retryUrl);
+
+      if (!retryResponse.ok) {
+        throw new Error('获取 Emby 集列表失败');
+      }
+
+      const retryData = await retryResponse.json();
+      return retryData.Items || [];
+    }
 
     if (!response.ok) {
       throw new Error('获取 Emby 集列表失败');
