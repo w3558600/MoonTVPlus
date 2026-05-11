@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,react-hooks/exhaustive-deps,@typescript-eslint/no-empty-function */
 
-import { ExternalLink, Heart, Info, Link, PlayCircleIcon, Radio, Sparkles, Trash2 } from 'lucide-react';
+import { Cloud, ExternalLink, Heart, Info, Link, PlayCircleIcon, Radio, Sparkles, Trash2 } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import React, {
@@ -21,12 +21,19 @@ import {
   saveFavorite,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
-import { processImageUrl } from '@/lib/utils';
+import { isNetdiskSource } from '@/lib/netdisk/source';
+import {
+  base58Decode,
+  getDoubanImageFallbackUrl,
+  processImageUrl,
+  tryApplyDoubanImageFallback,
+} from '@/lib/utils';
 import { useLongPress } from '@/hooks/useLongPress';
 
 import AIChatPanel from '@/components/AIChatPanel';
 import DetailPanel from '@/components/DetailPanel';
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
+import ImageViewer from '@/components/ImageViewer';
 import MobileActionSheet from '@/components/MobileActionSheet';
 
 export interface VideoCardProps {
@@ -104,14 +111,39 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
   ref
 ) {
   const router = useRouter();
+  const actualTitle = title;
+  const actualPoster = poster;
+  const netdiskPosterPlaceholder = useMemo(() => {
+    return `data:image/svg+xml;utf8,${encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600">
+        <rect width="400" height="600" fill="#f3f4f6"/>
+        <g fill="none" stroke="#9ca3af" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M118 332c-30.9 0-56-25.1-56-56 0-28.5 21.3-52 48.9-55.4C120.6 184.7 154.8 160 195 160c51.1 0 92.9 39.2 97.1 89.2 27.3 4.2 47.9 27.7 47.9 56.8 0 32-26 58-58 58H118z"/>
+        </g>
+      </svg>
+    `)}`;
+  }, []);
+  const processedPoster = useMemo(
+    () =>
+      actualPoster
+        ? processImageUrl(actualPoster)
+        : isNetdiskSource(source)
+          ? netdiskPosterPlaceholder
+          : '',
+    [actualPoster, source, netdiskPosterPlaceholder]
+  );
   const [favorited, setFavorited] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showMobileActions, setShowMobileActions] = useState(false);
   const [searchFavorited, setSearchFavorited] = useState<boolean | null>(null); // 搜索结果的收藏状态
   const [showAIChat, setShowAIChat] = useState(false);
+  const [isAIStreaming, setIsAIStreaming] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiDefaultMessageWithVideo, setAiDefaultMessageWithVideo] = useState('');
   const [showDetailPanel, setShowDetailPanel] = useState(false);
+  const [showImageViewer, setShowImageViewer] = useState(false);
+  const [showUpcomingInfo, setShowUpcomingInfo] = useState(false); // 控制即将上映倒计时的显示
+  const [displayPoster, setDisplayPoster] = useState(processedPoster);
 
   // 检查AI功能是否启用
   useEffect(() => {
@@ -152,14 +184,16 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     setDynamicDoubanId(douban_id);
   }, [douban_id]);
 
+  useEffect(() => {
+    setDisplayPoster(processedPoster);
+  }, [processedPoster]);
+
   useImperativeHandle(ref, () => ({
     setEpisodes: (eps?: number) => setDynamicEpisodes(eps),
     setSourceNames: (names?: string[]) => setDynamicSourceNames(names),
     setDoubanId: (id?: number) => setDynamicDoubanId(id),
   }));
 
-  const actualTitle = title;
-  const actualPoster = poster;
   const actualSource = source;
   const actualId = id;
   const actualDoubanId = dynamicDoubanId;
@@ -168,6 +202,14 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
   const actualQuery = query || '';
   const actualSearchType = type;
   const isDirectPlaySource = actualSource === 'directplay';
+  const directLinkUrl = useMemo(() => {
+    if (!isDirectPlaySource || !actualId) return '';
+    try {
+      return base58Decode(actualId);
+    } catch {
+      return '';
+    }
+  }, [isDirectPlaySource, actualId]);
   const displayYear = useMemo(() => {
     if (!actualYear) return '';
     const normalized = actualYear.trim();
@@ -274,8 +316,13 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
   );
 
   const handleClick = useCallback(() => {
-    // 即将上映的电影不跳转
+    // 即将上映的电影：单击显示上映倒计时提示，不跳转
     if (isUpcoming) {
+      setShowUpcomingInfo(true);
+      // 2秒后自动隐藏
+      setTimeout(() => {
+        setShowUpcomingInfo(false);
+      }, 2000);
       return;
     }
 
@@ -380,11 +427,6 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
 
   // 长按操作
   const handleLongPress = useCallback(() => {
-    // 即将上映的电影不显示操作菜单
-    if (isUpcoming) {
-      return;
-    }
-
     if (!showMobileActions) { // 防止重复触发
       // 立即显示菜单，避免等待数据加载导致动画卡顿
       setShowMobileActions(true);
@@ -394,7 +436,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
         checkSearchFavoriteStatus();
       }
     }
-  }, [isUpcoming, showMobileActions, from, isAggregate, actualSource, actualId, searchFavorited, checkSearchFavoriteStatus]);
+  }, [showMobileActions, from, isAggregate, actualSource, actualId, searchFavorited, checkSearchFavoriteStatus]);
 
   // 长按手势hook
   const longPressProps = useLongPress({
@@ -607,20 +649,22 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
       });
     }
 
-    // 详情页面按钮
-    actions.push({
-      id: 'detail',
-      label: '详情',
-      icon: <Info size={20} />,
-      onClick: () => {
-        setShowMobileActions(false);
-        // 延迟打开 DetailPanel，确保 MobileActionSheet 完全清理完成
-        setTimeout(() => {
-          setShowDetailPanel(true);
-        }, 250);
-      },
-      color: 'default' as const,
-    });
+    // 详情页面按钮（直播源不显示详情）
+    if (origin !== 'live') {
+      actions.push({
+        id: 'detail',
+        label: '详情',
+        icon: <Info size={20} />,
+        onClick: () => {
+          setShowMobileActions(false);
+          // 延迟打开 DetailPanel，确保 MobileActionSheet 完全清理完成
+          setTimeout(() => {
+            setShowDetailPanel(true);
+          }, 250);
+        },
+        color: 'default' as const,
+      });
+    }
 
     // AI问片功能
     if (aiEnabled && actualTitle) {
@@ -662,7 +706,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
   return (
     <>
       <div
-        className={`group relative w-full rounded-lg bg-transparent transition-all duration-300 ease-in-out hover:scale-[1.05] hover:z-[500] ${isUpcoming ? 'cursor-default' : 'cursor-pointer'}`}
+        className={`group relative w-full rounded-lg bg-transparent transition-all duration-300 ease-in-out hover:scale-[1.05] hover:z-[500] ${isUpcoming ? 'cursor-default' : 'cursor-pointer'} ${
+          showUpcomingInfo ? 'scale-[1.05] z-[500]' : ''
+        }`}
         onClick={handleClick}
         {...longPressProps}
         style={{
@@ -679,11 +725,6 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
           // 阻止默认右键菜单
           e.preventDefault();
           e.stopPropagation();
-
-          // 即将上映的电影不显示操作菜单
-          if (isUpcoming) {
-            return false;
-          }
 
           // 右键弹出操作菜单
           setShowMobileActions(true);
@@ -725,22 +766,37 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
             <div className='absolute inset-0 flex items-center justify-center bg-gray-200/80 dark:bg-gray-700/80'>
               <Link className='w-8 h-8 text-blue-500' />
             </div>
+          ) : (isNetdiskSource(actualSource) && !actualPoster && displayPoster === netdiskPosterPlaceholder) ? (
+            <div className='absolute inset-0 flex flex-col items-center justify-center bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'>
+              <Cloud className='w-10 h-10 opacity-80' />
+            </div>
           ) : (
             <Image
-              src={processImageUrl(actualPoster)}
+              src={displayPoster}
               alt={actualTitle}
               fill
               className={origin === 'live' ? 'object-contain' : orientation === 'horizontal' ? 'object-cover object-center' : 'object-cover'}
               referrerPolicy='no-referrer'
               loading='lazy'
               onLoadingComplete={() => setIsLoading(true)}
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowImageViewer(true);
+              }}
               onError={(e) => {
+                const img = e.currentTarget as HTMLImageElement;
+                const fallbackPoster = getDoubanImageFallbackUrl(actualPoster);
+                if (fallbackPoster && tryApplyDoubanImageFallback(img, actualPoster)) {
+                  setDisplayPoster(fallbackPoster);
+                  return;
+                }
+
                 // 图片加载失败时的重试机制
-                const img = e.target as HTMLImageElement;
                 if (!img.dataset.retried) {
                   img.dataset.retried = 'true';
                   setTimeout(() => {
-                    img.src = processImageUrl(actualPoster);
+                    setDisplayPoster(processedPoster);
+                    img.src = processedPoster;
                   }, 2000);
                 }
               }}
@@ -749,7 +805,8 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
                 WebkitUserSelect: 'none',
                 userSelect: 'none',
                 WebkitTouchCallout: 'none',
-                pointerEvents: 'none', // 图片不响应任何指针事件
+                pointerEvents: 'auto', // 改为auto以响应点击事件
+                cursor: 'pointer', // 添加指针样式
               } as React.CSSProperties}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -780,7 +837,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
           {isUpcoming && daysUntilRelease !== null ? (
             <div
               data-button="true"
-              className='absolute inset-0 flex items-center justify-center opacity-0 transition-all duration-300 ease-in-out delay-75 group-hover:opacity-100'
+              className={`absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out ${
+                showUpcomingInfo ? 'opacity-100 scale-100' : 'opacity-0 scale-75'
+              }`}
               style={{
                 WebkitUserSelect: 'none',
                 userSelect: 'none',
@@ -928,6 +987,38 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
             </div>
           )}
 
+          {/* 竖向模式：顶部直链地址显示 */}
+          {orientation === 'vertical' && isDirectPlaySource && directLinkUrl && (
+            <div
+              className='absolute top-1 left-1 right-1 sm:top-2 sm:left-2 sm:right-2 pt-1 px-1 sm:pt-2 sm:px-2'
+              style={{
+                WebkitUserSelect: 'none',
+                userSelect: 'none',
+                WebkitTouchCallout: 'none',
+              } as React.CSSProperties}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                return false;
+              }}
+            >
+              <div
+                className='text-[9px] sm:text-[10px] text-yellow-400 line-clamp-2 break-all'
+                style={{
+                  WebkitUserSelect: 'none',
+                  userSelect: 'none',
+                  WebkitTouchCallout: 'none',
+                } as React.CSSProperties}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  return false;
+                }}
+                title={directLinkUrl}
+              >
+                {directLinkUrl}
+              </div>
+            </div>
+          )}
+
           {actualEpisodes && actualEpisodes > 1 && orientation === 'vertical' && (
             <div
               className='absolute top-1 right-1 sm:top-2 sm:right-2 flex flex-col gap-0.5 sm:gap-1.5'
@@ -993,7 +1084,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
             >
               <span
                 className={`inline-block border rounded px-1 py-0.5 text-[8px] text-white/90 bg-black/60 ${
-                  actualSource === 'xiaoya' ? 'border-blue-500' : actualSource === 'openlist' || actualSource === 'emby' || actualSource?.startsWith('emby_') ? 'border-yellow-500' : origin === 'live' ? 'border-red-500' : 'border-white/60'
+                  actualSource === 'xiaoya' ? 'border-blue-500' : isNetdiskSource(actualSource) ? 'border-purple-500' : actualSource === 'openlist' || actualSource === 'emby' || actualSource?.startsWith('emby_') ? 'border-yellow-500' : origin === 'live' ? 'border-red-500' : 'border-white/60'
                 }`}
                 style={{
                   WebkitUserSelect: 'none',
@@ -1067,7 +1158,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
 
             return (
               <div
-                className='absolute bottom-2 right-2 opacity-0 transition-all duration-300 ease-in-out delay-75 sm:group-hover:opacity-100'
+                className={`absolute bottom-1 right-1 sm:bottom-2 sm:right-2 transition-all duration-300 ease-in-out delay-75 ${
+                  from === 'search' ? 'opacity-100' : 'opacity-0 sm:group-hover:opacity-100'
+                }`}
                 style={{
                   WebkitUserSelect: 'none',
                   userSelect: 'none',
@@ -1237,6 +1330,25 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
                     第{currentEpisode}集 · 共{actualEpisodes}集
                   </div>
                 )}
+
+                {/* 直链地址 */}
+                {isDirectPlaySource && directLinkUrl && (
+                  <div
+                    className='text-[10px] text-white/75 truncate'
+                    style={{
+                      WebkitUserSelect: 'none',
+                      userSelect: 'none',
+                      WebkitTouchCallout: 'none',
+                    } as React.CSSProperties}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      return false;
+                    }}
+                    title={directLinkUrl}
+                  >
+                    {directLinkUrl}
+                  </div>
+                )}
               </div>
 
               {/* 底部渐变遮罩 - 用于进度条背景 */}
@@ -1296,7 +1408,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
                       {config.showSourceName && source_name && !cmsData && (
                         <span
                           className={`inline-block border rounded px-1 py-0.5 text-[8px] text-white/90 bg-black/30 backdrop-blur-sm ${
-                            actualSource === 'xiaoya' ? 'border-blue-500' : actualSource === 'openlist' || actualSource === 'emby' || actualSource?.startsWith('emby_') ? 'border-yellow-500' : 'border-white/60'
+                            actualSource === 'xiaoya' ? 'border-blue-500' : isNetdiskSource(actualSource) ? 'border-purple-500' : actualSource === 'openlist' || actualSource === 'emby' || actualSource?.startsWith('emby_') ? 'border-yellow-500' : 'border-white/60'
                           }`}
                           style={{
                             WebkitUserSelect: 'none',
@@ -1470,21 +1582,26 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
         isOpen={showMobileActions}
         onClose={() => setShowMobileActions(false)}
         title={actualTitle}
-        poster={processImageUrl(actualPoster)}
+        poster={displayPoster}
         actions={mobileActions}
         sources={isAggregate && dynamicSourceNames ? Array.from(new Set(dynamicSourceNames)) : undefined}
         isAggregate={isAggregate}
         sourceName={cmsData ? undefined : source_name}
+        directLinkUrl={directLinkUrl || undefined}
         currentEpisode={currentEpisode}
         totalEpisodes={actualEpisodes}
         origin={origin}
+        onPosterClick={() => {
+          setShowImageViewer(true);
+        }}
       />
 
-      {/* AI问片面板 */}
-      {aiEnabled && showAIChat && (
+      {/* AI问片面板 - 只在打开或正在流式响应时渲染 */}
+      {aiEnabled && (showAIChat || isAIStreaming) && (
         <AIChatPanel
           isOpen={showAIChat}
           onClose={() => setShowAIChat(false)}
+          onStreamingChange={setIsAIStreaming}
           context={{
             title: actualTitle,
             year: actualYear,
@@ -1503,16 +1620,27 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
           isOpen={showDetailPanel}
           onClose={() => setShowDetailPanel(false)}
           title={actualTitle}
-          poster={processImageUrl(actualPoster)}
+          poster={displayPoster}
           doubanId={actualDoubanId}
           bangumiId={isBangumi ? actualDoubanId : undefined}
           isBangumi={isBangumi}
           tmdbId={tmdb_id}
           type={actualSearchType as 'movie' | 'tv'}
           seasonNumber={seasonNumber}
+          currentEpisode={currentEpisode}
           cmsData={cmsData}
           sourceId={id}
           source={source}
+        />
+      )}
+
+      {/* 图片查看器 */}
+      {showImageViewer && (
+        <ImageViewer
+          isOpen={showImageViewer}
+          onClose={() => setShowImageViewer(false)}
+          imageUrl={actualPoster}
+          alt={actualTitle}
         />
       )}
     </>
